@@ -4,6 +4,7 @@ XOR Cipher Playground — Streamlit Web App
 ==========================================
 Interactive demo of 64-bit keyed XOR encoding with TTL constraints.
 Shows how XOR can bind an input string to a timestamp using a secret key.
+Students will benefit from variable linkage approach. 
 
 Run:
     streamlit run xor_playground.py
@@ -23,6 +24,15 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from xor_core import xor_encode, get_ttl_date, xor_validate
 
+
+def _secret_to_key(raw_secret: str) -> int:
+    """Accept either a literal hex key (0x...) or a passphrase-derived key."""
+    secret = raw_secret.strip()
+    if secret.lower().startswith("0x"):
+        return int(secret, 16)
+    return int.from_bytes(hashlib.sha256(secret.encode()).digest()[:8], "big")
+
+
 # ── Secrets (loaded from Streamlit secrets — never hardcoded in repo) ─────────
 # Local dev:  .streamlit/secrets.toml  (gitignored)
 # Production: Streamlit Community Cloud dashboard → App settings → Secrets
@@ -38,13 +48,8 @@ except KeyError as _e:
     )
     st.stop()
 
-_KEY_PRESET_B: int = int.from_bytes(
-    hashlib.sha256(_PHRASE_PRESET_B.encode()).digest()[:8], "big"
-)
-_KEY_PRESET_C: int = int.from_bytes(
-    hashlib.sha256(_PHRASE_PRESET_C.encode()).digest()[:8],
-    "big",
-)
+_KEY_PRESET_B: int = _secret_to_key(_PHRASE_PRESET_B)
+_KEY_PRESET_C: int = _secret_to_key(_PHRASE_PRESET_C)
 
 _PRESETS: dict[str, dict] = {
     "Preset - A Seaweed": {
