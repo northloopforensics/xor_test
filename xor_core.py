@@ -18,10 +18,13 @@ Usage:
 
 """
 
+LICENSE_SALT = "peeper"
+
 def _hash_input(input_string: str) -> int:
-    """Returns the first 32 bits of the SHA-256 hash of the input string."""
-    digest = hashlib.sha256(input_string.encode("utf-8")).digest()
-    return int.from_bytes(digest[:4], "big")
+    """Returns the first 32 bits of the salted SHA-256 hash of the input string."""
+    salted = f"{LICENSE_SALT}:{input_string}"
+    digest = hashlib.sha256(salted.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
 
 def _xor_transform(data: int, key: int) -> int:
     """
