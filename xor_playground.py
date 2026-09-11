@@ -57,6 +57,7 @@ _PRESETS: dict[str, dict] = {
         "label": "Preset - C Peeps",
         "secret": _KEY_PRESET_C,
         "hint": "Fixed 64-bit XOR key",
+    }
 }
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
