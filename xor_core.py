@@ -1,7 +1,8 @@
+import hashlib
 import time
 import argparse
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 
 """
 XOR Cipher Core
@@ -18,14 +19,9 @@ Usage:
 """
 
 def _hash_input(input_string: str) -> int:
-    """Returns the leading 32 bits of a hex input string (e.g. a SHA-256 hardware ID)."""
-    return int(input_string[:8], 16)
-
-def _to_utc_timestamp(dt: datetime) -> int:
-    """Interpret naive datetimes as UTC so encoding is stable across timezones."""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return int(dt.astimezone(timezone.utc).timestamp())
+    """Returns the first 32 bits of the SHA-256 hash of the input string."""
+    digest = hashlib.sha256(input_string.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big")
 
 def _xor_transform(data: int, key: int) -> int:
     """
@@ -42,7 +38,7 @@ def xor_encode(input_string: str, ttl_date: datetime, key: int) -> str:
     The combined 64-bit integer is XORed against `key`.
     """
     input_hash = _hash_input(input_string)
-    ttl_timestamp = _to_utc_timestamp(ttl_date)
+    ttl_timestamp = int(ttl_date.timestamp())
 
     # Pack: [input hash (32)] | [ttl timestamp (32)]
     raw = (input_hash << 32) | ttl_timestamp
@@ -78,10 +74,10 @@ def xor_validate(encoded: str, input_string: str, key: int) -> bool:
     return True
 
 def get_ttl_date(encoded: str, key: int) -> datetime:
-    """Extracts the TTL date (UTC) embedded in an encoded string."""
+    """Extracts the TTL date embedded in an encoded string."""
     decoded = _xor_transform(int(encoded, 16), key)
     ttl_timestamp = decoded & 0xFFFFFFFF
-    return datetime.fromtimestamp(ttl_timestamp, tz=timezone.utc)
+    return datetime.fromtimestamp(ttl_timestamp)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
