@@ -21,7 +21,7 @@ from datetime import date, datetime, timedelta
 import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from license import generate_license, validate_license, get_expiration_date
+from xor_core import xor_encode, get_ttl_date, xor_validate
 
 
 def _secret_to_key(raw_secret: str) -> int:
@@ -177,7 +177,7 @@ if st.button("⚡  Encode", type="primary", use_container_width=True):
         if ttl_dt < datetime.now():
             st.warning("⚠️ The TTL date is in the past — encoding anyway.")
         try:
-            output = generate_license(input_clean, ttl_dt, config["secret"])
+            output = xor_encode(input_clean, ttl_dt, config["secret"])
             # Store result — preset config is looked up by label, secret never stored
             st.session_state.last_output = output
             st.session_state.last_preset = config["label"]
@@ -221,13 +221,13 @@ if st.session_state.last_output:
         elif not st.session_state.last_input:
             st.error("No input string stored for verification.")
         else:
-            is_valid = validate_license(
+            is_valid = xor_validate(
                 st.session_state.last_output,
                 st.session_state.last_input,
                 matched["secret"],
             )
             if is_valid:
-                ttl_dt = get_expiration_date(st.session_state.last_output, matched["secret"])
+                ttl_dt = get_ttl_date(st.session_state.last_output, matched["secret"])
                 st.success(f"✅ VALID — TTL {ttl_dt.strftime('%Y-%m-%d %H:%M:%S')}")
             else:
                 st.error("❌ INVALID — Output does not match input string or TTL has elapsed.")
