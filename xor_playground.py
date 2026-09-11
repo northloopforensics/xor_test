@@ -3,7 +3,6 @@
 XOR Cipher Playground — Streamlit Web App
 ==========================================
 Interactive demo of 64-bit keyed XOR encoding with TTL constraints.
-Shows how XOR can bind an input string to a timestamp using a secret key.
 
 Run:
     streamlit run xor_playground.py
@@ -20,31 +19,40 @@ from datetime import date, datetime, timedelta
 
 import streamlit as st
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from xor_core import xor_encode, get_ttl_date, xor_validate
+st.set_page_config(
+    page_title="XOR Cipher Playground",
+    page_icon="⊕",
+    layout="centered",
+)
 
-# ── Secrets (loaded from Streamlit secrets — never hardcoded in repo) ─────────
-# Local dev:  .streamlit/secrets.toml  (gitignored)
-# Production: Streamlit Community Cloud dashboard → App settings → Secrets
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from xor_core import get_ttl_date, xor_encode, xor_validate
+
+
+# Secrets
 try:
     _KEY_PRESET_A: int = int(st.secrets["XOR_KEY_PRESET_A"], 16)
     _PHRASE_PRESET_B: str = st.secrets["XOR_PHRASE_PRESET_B"]
     _PHRASE_PRESET_C: str = st.secrets["XOR_PHRASE_PRESET_C"]
     _APP_PASSWORD: str = st.secrets["APP_PASSWORD"]
-except KeyError as _e:
+except KeyError as error:
     st.error(
-        f"Missing secret: **{_e}**. "
-        "Add it to `.streamlit/secrets.toml` (local) or the Streamlit Cloud dashboard (production)."
+        f"Missing secret: **{error}**. "
+        "Add it to `.streamlit/secrets.toml` or Streamlit Cloud settings."
     )
     st.stop()
 
+
 _KEY_PRESET_B: int = int.from_bytes(
-    hashlib.sha256(_PHRASE_PRESET_B.encode()).digest()[:8], "big"
+    hashlib.sha256(_PHRASE_PRESET_B.encode()).digest()[:8],
+    "big",
 )
+
 _KEY_PRESET_C: int = int.from_bytes(
     hashlib.sha256(_PHRASE_PRESET_C.encode()).digest()[:8],
     "big",
 )
+
 
 _PRESETS: dict[str, dict] = {
     "Preset - A Seaweed": {
@@ -61,8 +69,324 @@ _PRESETS: dict[str, dict] = {
         "label": "Preset - C Peeps",
         "secret": _KEY_PRESET_C,
         "hint": "Key derived via SHA-256 from a passphrase",
-    }
+    },
 }
+
+
+def _check_password(password: str) -> bool:
+    """Constant-time password comparison."""
+    return hmac.compare_digest(
+        hashlib.sha256(password.encode()).hexdigest(),
+        hashlib.sha256(_APP_PASSWORD.encode()).hexdigest(),
+    )
+
+
+_DEFAULTS: dict = {
+    "authenticated": False,
+    "encoding_log": [],
+    "last_output": None,
+    "last_preset": None,
+    "last_input": None,
+    "last_ttl": None,
+    "exp_date": date.today() + timedelta(days=365),
+}
+
+for key, value in _DEFAULTS.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+
+# Login gate
+if not st.session_state.authenticated:
+    st.title("⊕ XOR Cipher Playground")
+    st.markdown("---")
+
+    with st.form("login"):
+        password = st.text_input(
+            "Password",
+            type="password",
+            placeholder="Enter password",
+        )
+
+        if st.form_submit_button(
+            "Login",
+            use_container_width=True,
+            type="primary",
+        ):
+            if _check_password(password):
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+
+    st.stop()
+
+
+# Main app
+title_col, logout_col = st.columns([5, 1])
+
+title_col.title("⊕ XOR Cipher Playground")
+
+if logout_col.button("Logout"):
+    st.session_state.authenticated = False
+    st.rerun()
+
+st.caption("64-bit keyed XOR encoding — input string × TTL timestamp")
+st.markdown("---")
+
+
+# Encode
+st.subheader("Encode")
+
+preset_key = st.selectbox(
+    "Key Preset",
+    list(_PRESETS.keys()),
+    index=1,
+)
+
+config = _PRESETS[preset_key]
+
+st.caption(f"ℹ️ {config['hint']}")
+
+input_str = st.text_input(
+    "Input String",
+    placeholder="Paste the input string here",
+)
+
+test_input = st.text_input(
+    "Test / Compare String",
+    placeholder="Optional — enter a second string to compare XOR output",
+)
+
+if test_input.strip():
+    input_hash = int(
+        hashlib.sha256(input_str.encode()).hexdigest()[:16],
+        16,
+    )
+    test_hash = int(
+        hashlib.sha256(test_input.encode()).hexdigest()[:16],
+        16,
+    )
+
+    bit_difference = bin(input_hash ^ test_hash).count("1")
+
+    st.caption(
+        f"XOR distance (bit diff): `{bit_difference}` bits differ"
+    )
+
+
+# TTL shortcuts
+with st.expander("TTL offset shortcuts"):
+    quick_columns = st.columns(5)
+
+    shortcuts = [
+        ("+30d", 30),
+        ("+90d", 90),
+        ("+1y", 365),
+        ("+2y", 730),
+        ("+5y", 1825),
+    ]
+
+    for column, (label, days) in zip(quick_columns, shortcuts):
+        if column.button(label, use_container_width=True):
+            st.session_state.exp_date = date.today() + timedelta(days=days)
+            st.rerun()
+
+
+exp_date: date = st.date_input(
+    "TTL Date",
+    value=st.session_state.exp_date,
+)
+
+st.session_state.exp_date = exp_date
+
+st.markdown("")
+
+
+# Encode button
+if st.button(
+    "⚡ Encode",
+    type="primary",
+    use_container_width=True,
+):
+    input_clean = input_str.strip()
+
+    if not input_clean:
+        st.error("Please enter an input string.")
+    else:
+        ttl_dt = datetime.combine(
+            exp_date,
+            datetime.max.time().replace(microsecond=0),
+        )
+
+        if ttl_dt < datetime.now():
+            st.warning("⚠️ The TTL date is in the past — encoding anyway.")
+
+        try:
+            output = xor_encode(
+                input_clean,
+                ttl_dt,
+                config["secret"],
+            )
+
+            st.session_state.last_output = output
+            st.session_state.last_preset = config["label"]
+            st.session_state.last_input = input_clean
+            st.session_state.last_ttl = exp_date.strftime("%Y-%m-%d")
+
+            record = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "preset": config["label"],
+                "input": input_clean,
+                "ttl": exp_date.strftime("%Y-%m-%d"),
+                "output": output,
+            }
+
+            st.session_state.encoding_log.insert(0, record)
+
+            st.success(
+                f"Encoded with **{config['label']}** — TTL **{exp_date}**"
+            )
+
+        except Exception as error:
+            st.error(f"Encoding failed: {error}")
+
+
+# Result display
+if st.session_state.last_output:
+    st.markdown("---")
+    st.subheader("Encoded Output")
+
+    st.code(
+        st.session_state.last_output,
+        language=None,
+    )
+
+    st.caption(
+        f"Preset: **{st.session_state.last_preset}** · "
+        f"TTL: **{st.session_state.last_ttl}**"
+    )
+
+    if st.button("✅ Decode & Verify"):
+        matched = next(
+            (
+                preset
+                for preset in _PRESETS.values()
+                if preset["label"] == st.session_state.last_preset
+            ),
+            None,
+        )
+
+        if matched is None:
+            st.error("Could not resolve preset for verification.")
+
+        elif not st.session_state.last_input:
+            st.error("No input string stored for verification.")
+
+        else:
+            is_valid = xor_validate(
+                st.session_state.last_output,
+                st.session_state.last_input,
+                matched["secret"],
+            )
+
+            if is_valid:
+                ttl_dt = get_ttl_date(
+                    st.session_state.last_output,
+                    matched["secret"],
+                )
+
+                st.success(
+                    f"✅ VALID — TTL "
+                    f"{ttl_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+            else:
+                st.error(
+                    "❌ INVALID — Output does not match the input "
+                    "string or the TTL has elapsed."
+                )
+
+
+# Encoding log
+st.markdown("---")
+st.subheader("Encoding Log")
+
+if st.session_state.encoding_log:
+    display_rows = [
+        {
+            "Encoded At": record["timestamp"],
+            "Preset": record["preset"],
+            "Input": (
+                record["input"][:16] + "…"
+                if len(record["input"]) > 16
+                else record["input"]
+            ),
+            "TTL": record["ttl"],
+            "Output": record["output"],
+        }
+        for record in st.session_state.encoding_log
+    ]
+
+    st.dataframe(
+        display_rows,
+        use_container_width=True,
+    )
+
+    export_fields = [
+        "timestamp",
+        "preset",
+        "input",
+        "ttl",
+        "output",
+    ]
+
+    safe_records = [
+        {
+            field: record[field]
+            for field in export_fields
+        }
+        for record in st.session_state.encoding_log
+    ]
+
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    csv_buffer = io.StringIO()
+    writer = csv.DictWriter(
+        csv_buffer,
+        fieldnames=export_fields,
+    )
+
+    writer.writeheader()
+    writer.writerows(safe_records)
+
+    csv_column, json_column, clear_column = st.columns([1, 1, 3])
+
+    csv_column.download_button(
+        "Export CSV",
+        data=csv_buffer.getvalue(),
+        file_name=f"xor_log_{timestamp_str}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    json_column.download_button(
+        "Export JSON",
+        data=json.dumps(safe_records, indent=2),
+        file_name=f"xor_log_{timestamp_str}.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+    if clear_column.button("🗑️ Clear Log"):
+        st.session_state.encoding_log = []
+        st.session_state.last_output = None
+        st.session_state.last_preset = None
+        st.session_state.last_input = None
+        st.session_state.last_ttl = None
+        st.rerun()
+
+else:
+    st.caption("No encodings yet in this session.")}
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 def _check_password(pw: str) -> bool:
