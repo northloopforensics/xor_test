@@ -55,16 +55,19 @@ _PRESETS: dict[str, dict] = {
         "label": "Preset - A Seaweed",
         "secret": _KEY_PRESET_A,
         "hint": "Fixed 64-bit XOR key",
+        "use_salt": False,
     },
     "Preset - B Vision": {
         "label": "Preset - B Vision",
         "secret": _KEY_PRESET_B,
         "hint": "Key derived via SHA-256 from a passphrase",
+        "use_salt": False,
     },
     "Preset - C Peeps": {
         "label": "Preset - C Peeps",
         "secret": _KEY_PRESET_C,
         "hint": "Key derived via SHA-256 from a passphrase",
+        "use_salt": True,
     }
 }
 
@@ -177,7 +180,7 @@ if st.button("⚡  Encode", type="primary", use_container_width=True):
         if ttl_dt < datetime.now():
             st.warning("⚠️ The TTL date is in the past — encoding anyway.")
         try:
-            output = xor_encode(input_clean, ttl_dt, config["secret"])
+            output = xor_encode(input_clean, ttl_dt, config["secret"], config["use_salt"])
             # Store result — preset config is looked up by label, secret never stored
             st.session_state.last_output = output
             st.session_state.last_preset = config["label"]
@@ -225,6 +228,7 @@ if st.session_state.last_output:
                 st.session_state.last_output,
                 st.session_state.last_input,
                 matched["secret"],
+                matched["use_salt"],
             )
             if is_valid:
                 ttl_dt = get_ttl_date(st.session_state.last_output, matched["secret"])
