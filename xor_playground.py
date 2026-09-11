@@ -1,287 +1,493 @@
 #!/usr/bin/env python3
 """
-XOR Cipher Playground — Streamlit Web App
-==========================================
-Interactive demo of 64-bit keyed XOR encoding with TTL constraints.
-Shows how XOR can bind an input string to a timestamp using a secret key.
-Students will benefit from variable linkage approach. 
+Sedgwick License Generator Tool
+================================
+A GUI tool for generating and managing license keys for Sedgwick.
 
-Run:
-    streamlit run xor_playground.py
+Generates hardware-bound, time-limited license keys that can be
+distributed to customers for activation within the application.
+
+Usage:
+    python3 license_generator.py
 """
 
-import csv
-import hashlib
-import hmac
-import io
-import json
-import os
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
 import sys
-from datetime import date, datetime, timedelta
+import os
+from datetime import datetime, timedelta
+import csv
+import json
+import platform
 
-import streamlit as st
-
+# Import the license module from the same directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from xor_core import xor_encode, get_ttl_date, xor_validate
+from license import generate_license, validate_license, get_expiration_date
+from hardware import get_hardware_id
+
+# Default secret key — must match the one in backend/server.py
+DEFAULT_SECRET_KEY = 0x504545504552C0DE
 
 
-def _secret_to_key(raw_secret: str) -> int:
-    """Accept either a literal hex key (0x...) or a passphrase-derived key."""
-    secret = raw_secret.strip()
-    if secret.lower().startswith("0x"):
-        return int(secret, 16)
-    return int.from_bytes(hashlib.sha256(secret.encode()).digest()[:8], "big")
+class LicenseGeneratorApp:
+    """Main GUI application for generating Sedgwick license keys."""
 
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Sedgwick License Generator")
+        self.root.geometry("850x750")
+        self.root.minsize(700, 600)
+        self.root.configure(bg="#f5f5f5")
 
-# ── Secrets (loaded from Streamlit secrets — never hardcoded in repo) ─────────
-# Local dev:  .streamlit/secrets.toml  (gitignored)
-# Production: Streamlit Community Cloud dashboard → App settings → Secrets
-try:
-    _KEY_PRESET_A: int = int(st.secrets["XOR_KEY_PRESET_A"], 16)
-    _PHRASE_PRESET_B: str = st.secrets["XOR_PHRASE_PRESET_B"]
-    _PHRASE_PRESET_C: str = st.secrets["XOR_PHRASE_PRESET_C"]
-    _APP_PASSWORD: str = st.secrets["APP_PASSWORD"]
-except KeyError as _e:
-    st.error(
-        f"Missing secret: **{_e}**. "
-        "Add it to `.streamlit/secrets.toml` (local) or the Streamlit Cloud dashboard (production)."
-    )
-    st.stop()
+        self.secret_key = DEFAULT_SECRET_KEY
+        self.generated_licenses = []  # History of generated licenses
+        
+        # Create log file in the same folder as this tool (portable for thumb drive)
+        self.log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                                     "license_generator.log")
 
-_KEY_PRESET_B: int = _secret_to_key(_PHRASE_PRESET_B)
-_KEY_PRESET_C: int = _secret_to_key(_PHRASE_PRESET_C)
+        self._build_ui()
 
-_PRESETS: dict[str, dict] = {
-    "Preset - A Seaweed": {
-        "label": "Preset - A Seaweed",
-        "secret": _KEY_PRESET_A,
-        "hint": "Fixed 64-bit XOR key",
-    },
-    "Preset - B Vision": {
-        "label": "Preset - B Vision",
-        "secret": _KEY_PRESET_B,
-        "hint": "Key derived via SHA-256 from a passphrase",
-    },
-    "Preset - C Peeps": {
-        "label": "Preset - C Peeps",
-        "secret": _KEY_PRESET_C,
-        "hint": "Key derived via SHA-256 from a passphrase",
-    }
-}
+    # ── UI Construction ────────────────────────────────────────────
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
-def _check_password(pw: str) -> bool:
-    """Constant-time password comparison to prevent timing attacks."""
-    return hmac.compare_digest(
-        hashlib.sha256(pw.encode()).hexdigest(),
-        hashlib.sha256(_APP_PASSWORD.encode()).hexdigest(),
-    )
+    def _build_ui(self):
+        style = ttk.Style()
+        style.theme_use("clam")
 
+        # Custom styles
+        style.configure("Title.TLabel", font=("Helvetica", 18, "bold"),
+                        background="#f5f5f5", foreground="#333")
+        style.configure("Subtitle.TLabel", font=("Helvetica", 10),
+                        background="#f5f5f5", foreground="#666")
+        style.configure("Section.TLabelframe.Label", font=("Helvetica", 12, "bold"))
+        style.configure("TLabelframe", background="#f5f5f5")
+        style.configure("TLabel", background="#f5f5f5")
+        style.configure("TFrame", background="#f5f5f5")
+        style.configure("Generate.TButton", font=("Helvetica", 12, "bold"),
+                        padding=(20, 10))
+        style.configure("Action.TButton", font=("Helvetica", 10), padding=(10, 5))
+        style.configure("Success.TLabel", foreground="#155724", background="#d4edda",
+                        font=("Helvetica", 11, "bold"), padding=5)
+        style.configure("Error.TLabel", foreground="#721c24", background="#f8d7da",
+                        font=("Helvetica", 11), padding=5)
 
-# ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="XOR Cipher Playground",
-    page_icon="⊕",
-    layout="centered",
-)
+        main_frame = ttk.Frame(self.root, padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
 
-# ── Session state defaults ────────────────────────────────────────────────────
-_DEFAULTS: dict = {
-    "authenticated": False,
-    "encoding_log": [],        # list[dict] — history for this session
-    "last_output": None,       # most recently encoded output
-    "last_preset": None,       # preset label used at encode time
-    "last_input": None,        # input string used at encode time
-    "last_ttl": None,          # TTL string used at encode time
-    "exp_date": date.today() + timedelta(days=365),
-}
-for _k, _v in _DEFAULTS.items():
-    if _k not in st.session_state:
-        st.session_state[_k] = _v
+        # ── Header ──
+        ttk.Label(main_frame, text="Sedgwick License Generator",
+                  style="Title.TLabel").pack(anchor=tk.W)
+        ttk.Label(main_frame, text="Generate hardware-bound license keys for Sedgwick",
+                  style="Subtitle.TLabel").pack(anchor=tk.W, pady=(0, 15))
 
+        # ── Single License Generation ──
+        gen_frame = ttk.LabelFrame(main_frame, text="  Generate License  ",
+                                   style="Section.TLabelframe", padding=15)
+        gen_frame.pack(fill=tk.X, pady=(0, 10))
 
-# ── Login gate ────────────────────────────────────────────────────────────────
-if not st.session_state.authenticated:
-    st.title("⊕ XOR Cipher Playground")
-    st.markdown("---")
-    with st.form("login"):
-        pw = st.text_input("Password", type="password", placeholder="Enter password")
-        if st.form_submit_button("Login", use_container_width=True, type="primary"):
-            if _check_password(pw):
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Incorrect password.")
-    st.stop()
+        # Hardware ID
+        hw_frame = ttk.Frame(gen_frame)
+        hw_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(hw_frame, text="Hardware ID:", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        self.hw_id_var = tk.StringVar()
+        hw_entry = ttk.Entry(hw_frame, textvariable=self.hw_id_var, width=50,
+                             font=("Courier", 11))
+        hw_entry.pack(side=tk.LEFT, padx=(5, 5))
+        ttk.Button(hw_frame, text="Paste", style="Action.TButton",
+                   command=self._paste_hardware_id).pack(side=tk.LEFT, padx=(0, 2))
 
+        # Expiration Date
+        exp_frame = ttk.Frame(gen_frame)
+        exp_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(exp_frame, text="Expiration:", width=15, anchor=tk.W).pack(side=tk.LEFT)
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Main App  (only reached after successful authentication)
-# ═════════════════════════════════════════════════════════════════════════════
-title_col, logout_col = st.columns([5, 1])
-title_col.title("⊕ XOR Cipher Playground")
-if logout_col.button("Logout"):
-    st.session_state.authenticated = False
-    st.rerun()
+        self.exp_var = tk.StringVar()
+        exp_entry = ttk.Entry(exp_frame, textvariable=self.exp_var, width=15,
+                              font=("Courier", 11))
+        exp_entry.pack(side=tk.LEFT, padx=(5, 10))
 
-st.caption("64-bit keyed XOR encoding — input string × TTL timestamp")
-st.markdown("---")
+        # Quick-set duration buttons
+        ttk.Label(exp_frame, text="Quick set:").pack(side=tk.LEFT, padx=(10, 5))
+        for label, days in [("30 days", 30), ("90 days", 90), ("1 year", 365),
+                            ("2 years", 730), ("5 years", 1825)]:
+            ttk.Button(exp_frame, text=label,
+                       command=lambda d=days: self._set_expiration_days(d)).pack(
+                side=tk.LEFT, padx=2)
 
-# ── Encode ────────────────────────────────────────────────────────────────────
-st.subheader("Encode")
+        # Set default expiration to 1 year from now
+        self._set_expiration_days(365)
 
-preset_key = st.selectbox("Key Preset", list(_PRESETS.keys()), index=1)
-config = _PRESETS[preset_key]
-st.caption(f"ℹ️ {config['hint']}")
+        # Secret Key (collapsible / advanced)
+        adv_frame = ttk.Frame(gen_frame)
+        adv_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(adv_frame, text="Secret Key:", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        self.secret_var = tk.StringVar(value=f"0x{DEFAULT_SECRET_KEY:016X}")
+        secret_entry = ttk.Entry(adv_frame, textvariable=self.secret_var, width=25,
+                                 font=("Courier", 11))
+        secret_entry.pack(side=tk.LEFT, padx=(5, 10))
+        ttk.Label(adv_frame, text="(must match server config)",
+                  foreground="#999").pack(side=tk.LEFT)
 
-input_str = st.text_input(
-    "Input String",
-    placeholder="Paste the input string here",
-)
+        # Generate Button
+        btn_frame = ttk.Frame(gen_frame)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(btn_frame, text="⚡ Generate License Key", style="Generate.TButton",
+                   command=self._generate_license).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(btn_frame, text="🖥️ License This Machine", style="Generate.TButton",
+                   command=self._license_this_machine).pack(side=tk.LEFT)
 
-test_input = st.text_input(
-    "Test / Compare String",
-    placeholder="Optional — enter a second string to compare XOR output",
-)
-if test_input.strip():
-    st.caption(
-        f"XOR distance (bit diff): `{bin(int(hashlib.sha256(input_str.encode()).hexdigest()[:8], 16) ^ int(hashlib.sha256(test_input.encode()).hexdigest()[:8], 16)).count('1')}` bits differ"
-    )
+        # ── Result Area ──
+        result_frame = ttk.LabelFrame(main_frame, text="  Generated Key  ",
+                                      style="Section.TLabelframe", padding=15)
+        result_frame.pack(fill=tk.X, pady=(0, 10))
 
-# TTL — quick-set buttons inside a collapsed expander
-with st.expander("TTL offset shortcuts"):
-    q_cols = st.columns(5)
-    for col, (label, days) in zip(
-        q_cols,
-        [("+30d", 30), ("+90d", 90), ("+1y", 365), ("+2y", 730), ("+5y", 1825)],
-    ):
-        if col.button(label, use_container_width=True):
-            st.session_state.exp_date = date.today() + timedelta(days=days)
-            st.rerun()
+        self.result_var = tk.StringVar(value="—")
+        result_entry = ttk.Entry(result_frame, textvariable=self.result_var,
+                                 font=("Courier", 16, "bold"), justify=tk.CENTER,
+                                 state="readonly")
+        result_entry.pack(fill=tk.X, pady=(0, 8))
 
-exp_date: date = st.date_input(
-    "TTL Date",
-    value=st.session_state.exp_date,
-)
-# Sync manual edits back to session state
-st.session_state.exp_date = exp_date
+        res_btn_frame = ttk.Frame(result_frame)
+        res_btn_frame.pack()
+        ttk.Button(res_btn_frame, text="📋 Copy to Clipboard", style="Action.TButton",
+                   command=self._copy_to_clipboard).pack(side=tk.LEFT, padx=5)
+        ttk.Button(res_btn_frame, text="✅ Verify Key", style="Action.TButton",
+                   command=self._verify_license).pack(side=tk.LEFT, padx=5)
 
-st.markdown("")
+        # Status message
+        self.status_var = tk.StringVar()
+        self.status_label = ttk.Label(result_frame, textvariable=self.status_var,
+                                      anchor=tk.CENTER)
+        self.status_label.pack(fill=tk.X, pady=(8, 0))
 
-# ── Encode button ─────────────────────────────────────────────────────────────
-if st.button("⚡  Encode", type="primary", use_container_width=True):
-    input_clean = input_str.strip()
-    if not input_clean:
-        st.error("Please enter an input string.")
-    else:
-        ttl_dt = datetime.combine(exp_date, datetime.max.time().replace(microsecond=0))
-        if ttl_dt < datetime.now():
-            st.warning("⚠️ The TTL date is in the past — encoding anyway.")
+        # ── License History ──
+        hist_frame = ttk.LabelFrame(main_frame, text="  License History  ",
+                                    style="Section.TLabelframe", padding=10)
+        hist_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        # Treeview for history
+        columns = ("timestamp", "hardware_id", "expiration", "license_key")
+        self.history_tree = ttk.Treeview(hist_frame, columns=columns, show="headings",
+                                         height=6)
+        self.history_tree.heading("timestamp", text="Generated At")
+        self.history_tree.heading("hardware_id", text="Hardware ID (first 16)")
+        self.history_tree.heading("expiration", text="Expiration")
+        self.history_tree.heading("license_key", text="License Key")
+
+        self.history_tree.column("timestamp", width=150, minwidth=120)
+        self.history_tree.column("hardware_id", width=180, minwidth=140)
+        self.history_tree.column("expiration", width=100, minwidth=80)
+        self.history_tree.column("license_key", width=200, minwidth=160)
+
+        scrollbar = ttk.Scrollbar(hist_frame, orient=tk.VERTICAL,
+                                  command=self.history_tree.yview)
+        self.history_tree.configure(yscrollcommand=scrollbar.set)
+
+        self.history_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # History action buttons
+        hist_btn_frame = ttk.Frame(main_frame)
+        hist_btn_frame.pack(fill=tk.X)
+        ttk.Button(hist_btn_frame, text="Export History (CSV)", style="Action.TButton",
+                   command=self._export_csv).pack(side=tk.LEFT, padx=5)
+        ttk.Button(hist_btn_frame, text="Export History (JSON)", style="Action.TButton",
+                   command=self._export_json).pack(side=tk.LEFT, padx=5)
+        ttk.Button(hist_btn_frame, text="Clear History", style="Action.TButton",
+                   command=self._clear_history).pack(side=tk.RIGHT, padx=5)
+
+        # ── Keyboard shortcuts ──
+        self.root.bind("<Command-g>", lambda e: self._generate_license())
+        self.root.bind("<Command-c>", lambda e: self._copy_to_clipboard())
+        self.root.bind("<Command-v>", lambda e: self._paste_hardware_id())
+
+    # ── Actions ────────────────────────────────────────────────────
+
+    def _set_expiration_days(self, days):
+        """Set expiration date to N days from today."""
+        exp = datetime.now() + timedelta(days=days)
+        self.exp_var.set(exp.strftime("%Y-%m-%d"))
+
+    def _paste_hardware_id(self):
+        """Paste clipboard content into the hardware ID field."""
         try:
-            output = xor_encode(input_clean, ttl_dt, config["secret"])
-            # Store result — preset config is looked up by label, secret never stored
-            st.session_state.last_output = output
-            st.session_state.last_preset = config["label"]
-            st.session_state.last_input = input_clean
-            st.session_state.last_ttl = exp_date.strftime("%Y-%m-%d")
+            clipboard = self.root.clipboard_get().strip()
+            self.hw_id_var.set(clipboard)
+        except tk.TclError:
+            pass
 
+    def _license_this_machine(self):
+        """License the current machine with a single click - complete one-step process."""
+        try:
+            # Get hardware ID
+            hw_id = get_hardware_id()
+            self.hw_id_var.set(hw_id)
+            
+            # Set expiration to 1 year from now
+            exp_date = datetime.now() + timedelta(days=365)
+            exp_date = exp_date.replace(hour=23, minute=59, second=59)
+            exp_str = exp_date.strftime("%Y-%m-%d")
+            self.exp_var.set(exp_str)
+            
+            # Parse secret key
+            secret = self._parse_secret_key()
+            if secret is None:
+                return
+            
+            # Generate license
+            try:
+                license_key = generate_license(hw_id, exp_date, secret)
+            except Exception as e:
+                messagebox.showerror("Generation Error", f"Failed to generate license:\n{e}")
+                return
+            
+            # Display the key
+            self.result_var.set(license_key)
+
+            # Add to history
             record = {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "preset": config["label"],
-                "input": input_clean,
-                "ttl": exp_date.strftime("%Y-%m-%d"),
-                "output": output,
-                # secret is intentionally excluded from all exports/history
+                "hardware_id": hw_id,
+                "expiration": exp_str,
+                "license_key": license_key,
             }
-            st.session_state.encoding_log.insert(0, record)
-            st.success(
-                f"Encoded with **{config['label']}** — TTL **{exp_date}**"
-            )
-        except Exception as exc:
-            st.error(f"Encoding failed: {exc}")
+            self.generated_licenses.append(record)
+            self.history_tree.insert("", 0, values=(
+                record["timestamp"],
+                hw_id[:16] + "…" if len(hw_id) > 16 else hw_id,
+                exp_str,
+                license_key,
+            ))
 
-# ── Result display ────────────────────────────────────────────────────────────
-if st.session_state.last_output:
-    st.markdown("---")
-    st.subheader("Encoded Output")
-    # st.code renders with a built-in copy button
-    st.code(st.session_state.last_output, language=None)
-    st.caption(
-        f"Preset: **{st.session_state.last_preset}** · "
-        f"TTL: **{st.session_state.last_ttl}**"
-    )
+            # Log to file
+            self._log_license(record)
 
-    if st.button("✅  Decode & Verify"):
-        # Resolve the secret by matching the stored preset label — key never leaves server
-        matched = next(
-            (c for c in _PRESETS.values() if c["label"] == st.session_state.last_preset),
-            None,
-        )
-        if matched is None:
-            st.error("Could not resolve preset for verification.")
-        elif not st.session_state.last_input:
-            st.error("No input string stored for verification.")
-        else:
-            is_valid = xor_validate(
-                st.session_state.last_output,
-                st.session_state.last_input,
-                matched["secret"],
-            )
-            if is_valid:
-                ttl_dt = get_ttl_date(st.session_state.last_output, matched["secret"])
-                st.success(f"✅ VALID — TTL {ttl_dt.strftime('%Y-%m-%d %H:%M:%S')}")
-            else:
-                st.error("❌ INVALID — Output does not match input string or TTL has elapsed.")
+            # Write license.key to Peeper's per-user application data folder.
+            try:
+                appdata = os.path.expandvars(r"%APPDATA%")
+                peeper_dir = os.path.join(appdata, "Peeper")
+                os.makedirs(peeper_dir, exist_ok=True)
+                key_file = os.path.join(peeper_dir, "license.key")
+                with open(key_file, "w") as f:
+                    f.write(license_key)
+                self.status_var.set(f"✓ Machine licensed! Expires {exp_str}  —  Key installed to AppData")
+            except Exception as e:
+                self.status_var.set(f"✓ Key generated but could not save to AppData: {e}")
+            self.status_label.configure(style="Success.TLabel")
 
-# ── Encoding Log ──────────────────────────────────────────────────────────────
-st.markdown("---")
-st.subheader("Encoding Log")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to license this machine:\n{e}")
 
-if st.session_state.encoding_log:
-    # Display table (secret key is intentionally excluded)
-    display_rows = [
-        {
-            "Encoded At": r["timestamp"],
-            "Preset": r["preset"],
-            "Input": r["input"][:16] + "…" if len(r["input"]) > 16 else r["input"],
-            "TTL": r["ttl"],
-            "Output": r["output"],
+    def _parse_secret_key(self):
+        """Parse the secret key from the UI field."""
+        raw = self.secret_var.get().strip()
+        try:
+            if raw.startswith("0x") or raw.startswith("0X"):
+                return int(raw, 16)
+            return int(raw)
+        except ValueError:
+            messagebox.showerror("Invalid Secret Key",
+                                 "Secret key must be a valid integer or hex (0x...) value.")
+            return None
+
+    def _generate_license(self):
+        """Generate a license key from the current inputs."""
+        hw_id = self.hw_id_var.get().strip()
+        if not hw_id:
+            messagebox.showwarning("Missing Hardware ID",
+                                   "Please enter the customer's Hardware ID.")
+            return
+
+        exp_str = self.exp_var.get().strip()
+        try:
+            exp_date = datetime.strptime(exp_str, "%Y-%m-%d")
+            exp_date = exp_date.replace(hour=23, minute=59, second=59)
+        except ValueError:
+            messagebox.showerror("Invalid Date",
+                                 "Expiration date must be in YYYY-MM-DD format.")
+            return
+
+        if exp_date < datetime.now():
+            if not messagebox.askyesno("Past Expiration",
+                                       "The expiration date is in the past.\n"
+                                       "Generate anyway?"):
+                return
+
+        secret = self._parse_secret_key()
+        if secret is None:
+            return
+
+        # Generate
+        try:
+            license_key = generate_license(hw_id, exp_date, secret)
+        except Exception as e:
+            messagebox.showerror("Generation Error", f"Failed to generate license:\n{e}")
+            return
+
+        self.result_var.set(license_key)
+        self.status_var.set(f"Key generated for expiration {exp_str}")
+        self.status_label.configure(style="Success.TLabel")
+
+        # Add to history
+        record = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "hardware_id": hw_id,
+            "expiration": exp_str,
+            "license_key": license_key,
         }
-        for r in st.session_state.encoding_log
-    ]
-    st.dataframe(display_rows, use_container_width=True)
+        self.generated_licenses.append(record)
+        self.history_tree.insert("", 0, values=(
+            record["timestamp"],
+            hw_id[:16] + "…" if len(hw_id) > 16 else hw_id,
+            exp_str,
+            license_key,
+        ))
+        
+        # Log to file
+        self._log_license(record)
 
-    _EXPORT_FIELDS = ["timestamp", "preset", "input", "ttl", "output"]
-    safe_records = [{k: r[k] for k in _EXPORT_FIELDS} for r in st.session_state.encoding_log]
-    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    def _copy_to_clipboard(self):
+        """Copy the generated license key to the clipboard."""
+        key = self.result_var.get()
+        if not key or key == "—":
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(key)
+        self.status_var.set("Copied to clipboard!")
+        self.status_label.configure(style="Success.TLabel")
 
-    # CSV export
-    csv_buf = io.StringIO()
-    w = csv.DictWriter(csv_buf, fieldnames=_EXPORT_FIELDS)
-    w.writeheader()
-    w.writerows(safe_records)
+    def _verify_license(self):
+        """Verify the generated key against the current inputs."""
+        key = self.result_var.get()
+        if not key or key == "—":
+            messagebox.showinfo("No Key", "Generate a key first.")
+            return
 
-    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 3])
-    btn_col1.download_button(
-        "Export CSV",
-        data=csv_buf.getvalue(),
-        file_name=f"xor_log_{timestamp_str}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-    btn_col2.download_button(
-        "Export JSON",
-        data=json.dumps(safe_records, indent=2),
-        file_name=f"xor_log_{timestamp_str}.json",
-        mime="application/json",
-        use_container_width=True,
-    )
-    if btn_col3.button("🗑️  Clear Log"):
-        st.session_state.encoding_log = []
-        st.session_state.last_output = None
-        st.session_state.last_preset = None
-        st.session_state.last_input = None
-        st.session_state.last_ttl = None
-        st.rerun()
-else:
-    st.caption("No encodings yet in this session.")
+        hw_id = self.hw_id_var.get().strip()
+        if not hw_id:
+            messagebox.showwarning("Missing Hardware ID",
+                                   "Enter a Hardware ID to verify against.")
+            return
+
+        secret = self._parse_secret_key()
+        if secret is None:
+            return
+
+        is_valid = validate_license(key, hw_id, secret)
+        if is_valid:
+            exp = get_expiration_date(key, secret)
+            self.status_var.set(f"✅ VALID — Expires {exp.strftime('%Y-%m-%d %H:%M:%S')}")
+            self.status_label.configure(style="Success.TLabel")
+        else:
+            self.status_var.set("❌ INVALID — Key does not match hardware ID or is expired")
+            self.status_label.configure(style="Error.TLabel")
+
+    # ── Export / History ───────────────────────────────────────────
+
+    def _export_csv(self):
+        """Export license history to CSV."""
+        if not self.generated_licenses:
+            messagebox.showinfo("Empty History", "No licenses to export.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export Licenses as CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            initialfile=f"segdwick_licenses_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["timestamp", "hardware_id",
+                                                        "expiration", "license_key"])
+                writer.writeheader()
+                writer.writerows(self.generated_licenses)
+            self.status_var.set(f"Exported {len(self.generated_licenses)} licenses to CSV")
+            self.status_label.configure(style="Success.TLabel")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export CSV:\n{e}")
+
+    def _export_json(self):
+        """Export license history to JSON."""
+        if not self.generated_licenses:
+            messagebox.showinfo("Empty History", "No licenses to export.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export Licenses as JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json")],
+            initialfile=f"segdwick_licenses_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "w") as f:
+                json.dump(self.generated_licenses, f, indent=2)
+            self.status_var.set(f"Exported {len(self.generated_licenses)} licenses to JSON")
+            self.status_label.configure(style="Success.TLabel")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export JSON:\n{e}")
+
+    def _clear_history(self):
+        """Clear the license generation history."""
+        if not self.generated_licenses:
+            return
+        if messagebox.askyesno("Clear History",
+                               "Clear all license generation history?"):
+            self.generated_licenses.clear()
+            for item in self.history_tree.get_children():
+                self.history_tree.delete(item)
+            self.status_var.set("History cleared")
+            self.status_label.configure(style="Success.TLabel")
+
+    def _log_license(self, record):
+        """Log license generation to the log file."""
+        try:
+            # Collect machine information
+            machine_info = {
+                "hostname": platform.node(),
+                "system": platform.system(),
+                "release": platform.release(),
+                "machine": platform.machine(),
+            }
+            
+            # Format log entry
+            log_entry = (
+                f"\n{'='*80}\n"
+                f"Timestamp: {record['timestamp']}\n"
+                f"Machine: {machine_info['hostname']} ({machine_info['system']} {machine_info['machine']})\n"
+                f"Hardware ID: {record['hardware_id']}\n"
+                f"License Key: {record['license_key']}\n"
+                f"Expiration: {record['expiration']}\n"
+                f"{'='*80}\n"
+            )
+            
+            # Append to log file
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(log_entry)
+        except Exception as e:
+            print(f"Warning: Failed to write to log file: {e}")
+
+
+def main():
+    root = tk.Tk()
+
+    # macOS-specific styling
+    if sys.platform == "darwin":
+        try:
+            root.tk.call("::tk::unsupported::MacWindowStyle", "style",
+                         root._w, "document", "closeBox collapseBox")
+        except tk.TclError:
+            pass
+
+    app = LicenseGeneratorApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
