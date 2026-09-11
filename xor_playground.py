@@ -29,6 +29,7 @@ from xor_core import xor_encode, get_ttl_date, xor_validate
 try:
     _KEY_PRESET_A: int = int(st.secrets["XOR_KEY_PRESET_A"], 16)
     _PHRASE_PRESET_B: str = st.secrets["XOR_PHRASE_PRESET_B"]
+    _PHRASE_PRESET_C: str = st.secrest["XOR_PHRASE_PRESET_C"]
     _APP_PASSWORD: str = st.secrets["APP_PASSWORD"]
 except KeyError as _e:
     st.error(
@@ -52,6 +53,10 @@ _PRESETS: dict[str, dict] = {
         "secret": _KEY_PRESET_B,
         "hint": "Key derived via SHA-256 from a passphrase",
     },
+    "Preset - C Peeps": {
+        "label": "Preset - C Peeps",
+        "secret": _KEY_PRESET_C,
+        "hint": "Fixed 64-bit XOR key",
 }
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
