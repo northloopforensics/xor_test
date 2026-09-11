@@ -1,6 +1,5 @@
-import struct
-import time
 import hashlib
+import time
 import argparse
 import sys
 from datetime import datetime
@@ -20,9 +19,9 @@ Usage:
 """
 
 def _hash_input(input_string: str) -> int:
-    """Returns the first 32 bits of the input string's hash as an integer."""
-    # Take the first 8 hex chars (32 bits) of the input as the hash component
-    return int(input_string[:8], 16)
+    """Returns a stable 32-bit hash for the input string."""
+    digest = hashlib.sha256(input_string.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big")
 
 def _xor_transform(data: int, key: int) -> int:
     """
