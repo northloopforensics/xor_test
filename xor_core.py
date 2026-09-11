@@ -21,10 +21,12 @@ Usage:
 LICENSE_SALT = "peeper"
 
 def _hash_input(input_string: str, use_salt: bool = True) -> int:
-    """Returns the first 32 bits of the SHA-256 hash of the input string, salted only if use_salt is True."""
-    data = f"{LICENSE_SALT}:{input_string}" if use_salt else input_string
-    digest = hashlib.sha256(data.encode("utf-8")).hexdigest()
-    return int(digest[:8], 16)
+    """Peeps (use_salt=True): first 32 bits of SHA-256(salt:input). Seaweed/Vision: input is already a hex hash (e.g. from hardware.py) — its first 32 bits are used directly."""
+    if use_salt:
+        salted = f"{LICENSE_SALT}:{input_string}"
+        digest = hashlib.sha256(salted.encode("utf-8")).hexdigest()
+        return int(digest[:8], 16)
+    return int(input_string[:8], 16)
 
 def _xor_transform(data: int, key: int) -> int:
     """
