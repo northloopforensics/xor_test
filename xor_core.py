@@ -20,10 +20,10 @@ Usage:
 
 LICENSE_SALT = "peeper"
 
-def _hash_input(input_string: str) -> int:
-    """Returns the first 32 bits of the salted SHA-256 hash of the input string."""
-    salted = f"{LICENSE_SALT}:{input_string}"
-    digest = hashlib.sha256(salted.encode("utf-8")).hexdigest()
+def _hash_input(input_string: str, use_salt: bool = True) -> int:
+    """Returns the first 32 bits of the SHA-256 hash of the input string, salted only if use_salt is True."""
+    data = f"{LICENSE_SALT}:{input_string}" if use_salt else input_string
+    digest = hashlib.sha256(data.encode("utf-8")).hexdigest()
     return int(digest[:8], 16)
 
 def _xor_transform(data: int, key: int) -> int:
@@ -34,13 +34,13 @@ def _xor_transform(data: int, key: int) -> int:
     """
     return data ^ key
 
-def xor_encode(input_string: str, ttl_date: datetime, key: int) -> str:
+def xor_encode(input_string: str, ttl_date: datetime, key: int, use_salt: bool = True) -> str:
     """
     Produces a 64-bit XOR-encoded hex string.
     Layout: high 32 bits = hash of input_string, low 32 bits = TTL timestamp.
     The combined 64-bit integer is XORed against `key`.
     """
-    input_hash = _hash_input(input_string)
+    input_hash = _hash_input(input_string, use_salt)
     ttl_timestamp = int(ttl_date.timestamp())
 
     # Pack: [input hash (32)] | [ttl timestamp (32)]
@@ -49,7 +49,7 @@ def xor_encode(input_string: str, ttl_date: datetime, key: int) -> str:
     encoded = _xor_transform(raw, key)
     return f"{encoded:016X}"
 
-def xor_validate(encoded: str, input_string: str, key: int) -> bool:
+def xor_validate(encoded: str, input_string: str, key: int, use_salt: bool = True) -> bool:
     """
     Reverses the XOR encoding and checks both the input hash and TTL.
     Returns True only if the input hash matches and the TTL has not elapsed.
@@ -67,7 +67,7 @@ def xor_validate(encoded: str, input_string: str, key: int) -> bool:
     ttl_timestamp_stored = decoded & 0xFFFFFFFF
 
     # Check input hash
-    if input_hash_stored != _hash_input(input_string):
+    if input_hash_stored != _hash_input(input_string, use_salt):
         return False
 
     # Check TTL
