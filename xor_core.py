@@ -1,4 +1,3 @@
-import hashlib
 import time
 import argparse
 import sys
@@ -19,9 +18,8 @@ Usage:
 """
 
 def _hash_input(input_string: str) -> int:
-    """Returns a stable 32-bit hash for the input string."""
-    digest = hashlib.sha256(input_string.encode("utf-8")).digest()
-    return int.from_bytes(digest[:4], "big")
+    """Returns the leading 32 bits of a hex input string (e.g. a SHA-256 hardware ID)."""
+    return int(input_string[:8], 16)
 
 def _to_utc_timestamp(dt: datetime) -> int:
     """Interpret naive datetimes as UTC so encoding is stable across timezones."""
