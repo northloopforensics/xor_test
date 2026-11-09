@@ -16,12 +16,12 @@ import io
 import json
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from xor_core import xor_encode, get_ttl_date, xor_validate
+from xor_core import MESSAGEBOARD_KEY, get_ttl_date, messageboard_encode, xor_encode, xor_validate
 
 
 def _secret_to_key(raw_secret: str) -> int:
@@ -68,8 +68,15 @@ _PRESETS: dict[str, dict] = {
         "secret": _KEY_PRESET_C,
         "hint": "Key derived via SHA-256 from a passphrase",
         "use_salt": True,
-    }
+    },
+    "Preset - D NLC Messageboard": {
+        "label": "Preset - D NLC Messageboard",
+        "secret": MESSAGEBOARD_KEY,
+        "hint": "NLC Messageboard device-bound licenses (expiring or perpetual)",
+        "use_salt": False,
+    },
 }
+
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 def _check_password(pw: str) -> bool:
@@ -90,11 +97,11 @@ st.set_page_config(
 # ── Session state defaults ────────────────────────────────────────────────────
 _DEFAULTS: dict = {
     "authenticated": False,
-    "encoding_log": [],        # list[dict] — history for this session
-    "last_output": None,       # most recently encoded output
-    "last_preset": None,       # preset label used at encode time
-    "last_input": None,        # input string used at encode time
-    "last_ttl": None,          # TTL string used at encode time
+    "encoding_log": [],  # list[dict] — history for this session
+    "last_output": None,  # most recently encoded output
+    "last_preset": None,  # preset label used at encode time
+    "last_input": None,  # input string used at encode time
+    "last_ttl": None,  # TTL string used at encode time
     "exp_date": date.today() + timedelta(days=365),
 }
 for _k, _v in _DEFAULTS.items():
@@ -126,29 +133,36 @@ if logout_col.button("Logout"):
     st.session_state.authenticated = False
     st.rerun()
 
-st.caption("64-bit keyed XOR encoding — input string × TTL timestamp")
+st.caption("64-bit keyed XOR encoding — device-bound licenses and TTL presets")
 st.markdown("---")
 
 # ── Encode ────────────────────────────────────────────────────────────────────
 st.subheader("Encode")
 
-preset_key = st.selectbox("Key Preset", list(_PRESETS.keys()), index=1)
+preset_key = st.selectbox("Key Preset", list(_PRESETS.keys()), index=3)
 config = _PRESETS[preset_key]
+is_messageboard = preset_key == "Preset - D NLC Messageboard"
 st.caption(f"ℹ️ {config['hint']}")
 
 input_str = st.text_input(
-    "Input String",
-    placeholder="Paste the input string here",
+    "Hardware ID" if is_messageboard else "Input String",
+    placeholder="Paste the 64-character device ID from Messageboard"
+    if is_messageboard
+    else "Paste the input string here",
 )
+
+perpetual = False
+if is_messageboard:
+    perpetual = st.checkbox("Perpetual license on this device (no expiration)")
 
 test_input = st.text_input(
     "Test / Compare String",
     placeholder="Optional — enter a second string to compare XOR output",
 )
 if test_input.strip():
-    st.caption(
-        f"XOR distance (bit diff): `{bin(int(hashlib.sha256(input_str.encode()).hexdigest()[:8], 16) ^ int(hashlib.sha256(test_input.encode()).hexdigest()[:8], 16)).count('1')}` bits differ"
-    )
+    first_hash = int(hashlib.sha256(input_str.encode()).hexdigest()[:8], 16)
+    second_hash = int(hashlib.sha256(test_input.encode()).hexdigest()[:8], 16)
+    st.caption(f"XOR distance (bit diff): `{(first_hash ^ second_hash).bit_count()}` bits differ")
 
 # TTL — quick-set buttons inside a collapsed expander
 with st.expander("TTL offset shortcuts"):
@@ -156,14 +170,16 @@ with st.expander("TTL offset shortcuts"):
     for col, (label, days) in zip(
         q_cols,
         [("+30d", 30), ("+90d", 90), ("+1y", 365), ("+2y", 730), ("+5y", 1825)],
+        strict=True,
     ):
-        if col.button(label, use_container_width=True):
+        if col.button(label, use_container_width=True, disabled=perpetual):
             st.session_state.exp_date = date.today() + timedelta(days=days)
             st.rerun()
 
 exp_date: date = st.date_input(
-    "TTL Date",
+    "Expiration date (UTC)" if is_messageboard else "TTL Date",
     value=st.session_state.exp_date,
+    disabled=perpetual,
 )
 # Sync manual edits back to session state
 st.session_state.exp_date = exp_date
@@ -174,32 +190,45 @@ st.markdown("")
 if st.button("⚡  Encode", type="primary", use_container_width=True):
     input_clean = input_str.strip()
     if not input_clean:
-        st.error("Please enter an input string.")
+        st.error(
+            "Please enter a hardware ID." if is_messageboard else "Please enter an input string."
+        )
     else:
-        ttl_dt = datetime.combine(exp_date, datetime.max.time().replace(microsecond=0))
-        if ttl_dt < datetime.now():
+        ttl_dt = (
+            None
+            if perpetual
+            else datetime.combine(
+                exp_date,
+                datetime.max.time().replace(microsecond=0),
+                tzinfo=UTC if is_messageboard else None,
+            )
+        )
+        ttl_label = "Perpetual (this device)" if perpetual else exp_date.strftime("%Y-%m-%d")
+        if ttl_dt is not None and ttl_dt < datetime.now(ttl_dt.tzinfo):
             st.warning("⚠️ The TTL date is in the past — encoding anyway.")
         try:
-            output = xor_encode(input_clean, ttl_dt, config["secret"], config["use_salt"])
+            output = (
+                messageboard_encode(input_clean, ttl_dt)
+                if is_messageboard
+                else xor_encode(input_clean, ttl_dt, config["secret"], config["use_salt"])
+            )
             # Store result — preset config is looked up by label, secret never stored
             st.session_state.last_output = output
             st.session_state.last_preset = config["label"]
             st.session_state.last_input = input_clean
-            st.session_state.last_ttl = exp_date.strftime("%Y-%m-%d")
+            st.session_state.last_ttl = ttl_label
 
             record = {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "preset": config["label"],
                 "input": input_clean,
-                "ttl": exp_date.strftime("%Y-%m-%d"),
+                "ttl": ttl_label,
                 "output": output,
                 # secret is intentionally excluded from all exports/history
             }
             st.session_state.encoding_log.insert(0, record)
-            st.success(
-                f"Encoded with **{config['label']}** — TTL **{exp_date}**"
-            )
-        except Exception as exc:
+            st.success(f"Encoded with **{config['label']}** — TTL **{ttl_label}**")
+        except ValueError as exc:
             st.error(f"Encoding failed: {exc}")
 
 # ── Result display ────────────────────────────────────────────────────────────
@@ -208,10 +237,7 @@ if st.session_state.last_output:
     st.subheader("Encoded Output")
     # st.code renders with a built-in copy button
     st.code(st.session_state.last_output, language=None)
-    st.caption(
-        f"Preset: **{st.session_state.last_preset}** · "
-        f"TTL: **{st.session_state.last_ttl}**"
-    )
+    st.caption(f"Preset: **{st.session_state.last_preset}** · TTL: **{st.session_state.last_ttl}**")
 
     if st.button("✅  Decode & Verify"):
         # Resolve the secret by matching the stored preset label — key never leaves server
@@ -232,7 +258,12 @@ if st.session_state.last_output:
             )
             if is_valid:
                 ttl_dt = get_ttl_date(st.session_state.last_output, matched["secret"])
-                st.success(f"✅ VALID — TTL {ttl_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+                duration = (
+                    f"Expires {ttl_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+                    if ttl_dt
+                    else "Perpetual (this device)"
+                )
+                st.success(f"✅ VALID — {duration}")
             else:
                 st.error("❌ INVALID — Output does not match input string or TTL has elapsed.")
 
